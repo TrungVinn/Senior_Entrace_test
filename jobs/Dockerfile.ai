@@ -1,0 +1,20 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir \
+    "clickhouse-connect>=0.7.0" \
+    "pandas>=2.2.0" \
+    "numpy>=1.26.0" \
+    "scikit-learn>=1.4.0" \
+    "python-dotenv>=1.0.1"
+
+COPY src/config/ config/
+COPY src/utils/ utils/
+COPY src/common/ common/
+COPY src/ai/ ai/
+
+RUN useradd --create-home appuser
+USER appuser
+
+CMD ["python", "-m", "ai.runner"]

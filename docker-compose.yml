@@ -1,0 +1,118 @@
+version: "3.9"
+
+services:
+  # ===========================================================================
+  # Redis (local dev — use Redis Cloud for production)
+  # ===========================================================================
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ===========================================================================
+  # Go Backend API (Fiber — serves data from ClickHouse)
+  # ===========================================================================
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: 8080
+      SERVICE_NAME: trading-dashboard
+      CLICKHOUSE_HOST: ${CLICKHOUSE_HOST:-}
+      CLICKHOUSE_NATIVE_PORT: ${CLICKHOUSE_NATIVE_PORT:-9440}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-default}
+      CLICKHOUSE_SECURE: ${CLICKHOUSE_SECURE:-true}
+    restart: unless-stopped
+
+  # ===========================================================================
+  # Binance WebSocket → Redis Streams Producer
+  # ===========================================================================
+  producer:
+    build:
+      context: ./jobs
+      dockerfile: Dockerfile.producer
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ""
+      REDIS_SSL: "false"
+      REDIS_STREAM_KEY: binance_market_data
+      REDIS_MAXLEN: 100000
+      BINANCE_SYMBOLS: btcusdt,ethusdt,bnbusdt,solusdt,xrpusdt
+      BINANCE_INTERVAL: 1m
+      LOG_LEVEL: INFO
+    restart: unless-stopped
+
+  # ===========================================================================
+  # Stream Processor (Redis → ClickHouse)
+  # ===========================================================================
+  processor:
+    build:
+      context: ./jobs
+      dockerfile: Dockerfile.processor
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ""
+      REDIS_SSL: "false"
+      REDIS_STREAM_KEY: binance_market_data
+      REDIS_CONSUMER_GROUP: market_processor
+      CLICKHOUSE_HOST: ${CLICKHOUSE_HOST:-}
+      CLICKHOUSE_PORT: ${CLICKHOUSE_PORT:-8443}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-default}
+      CLICKHOUSE_SECURE: ${CLICKHOUSE_SECURE:-true}
+      STREAM_BATCH_SIZE: 500
+      STREAM_BLOCK_MS: 5000
+      LOG_LEVEL: INFO
+    restart: unless-stopped
+
+  # ===========================================================================
+  # AI Jobs (signal scoring, anomaly detection, regime classification)
+  # ===========================================================================
+  ai-jobs:
+    build:
+      context: ./jobs
+      dockerfile: Dockerfile.ai
+    environment:
+      CLICKHOUSE_HOST: ${CLICKHOUSE_HOST:-}
+      CLICKHOUSE_PORT: ${CLICKHOUSE_PORT:-8443}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-default}
+      CLICKHOUSE_SECURE: ${CLICKHOUSE_SECURE:-true}
+      LOG_LEVEL: INFO
+    restart: unless-stopped
+
+  # ===========================================================================
+  # RedisInsight (optional — web UI for monitoring streams)
+  # ===========================================================================
+  redisinsight:
+    image: redis/redisinsight:latest
+    ports:
+      - "5540:5540"
+    depends_on:
+      - redis
+
+volumes:
+  redis_data:
