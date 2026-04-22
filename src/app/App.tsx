@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Activity } from 'lucide-react';
 import { TradingChart } from './components/TradingChart';
 import { Watchlist } from './components/Watchlist';
@@ -7,6 +7,11 @@ import { MetricCards } from './components/MetricCards';
 
 export default function App() {
   const [activeSymbol, setActiveSymbol] = useState<string>('BTCUSDT');
+  const [clock, setClock] = useState(() => new Date().toLocaleTimeString());
+  useEffect(() => {
+    const id = setInterval(() => setClock(new Date().toLocaleTimeString()), 1000);
+    return () => clearInterval(id);
+  }, []);
 
   return (
     <div className="flex flex-col h-screen w-full bg-[#030712] text-slate-300 font-sans overflow-hidden selection:bg-indigo-500/30">
@@ -22,6 +27,19 @@ export default function App() {
               Crypto Market Intelligence
             </span>
           </div>
+        </div>
+
+        <div className="ml-auto flex items-center gap-3">
+          <div className="flex items-center gap-1.5">
+            <span className="relative flex h-2 w-2">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+            </span>
+            <span className="text-[10px] text-emerald-400 font-mono font-bold uppercase tracking-widest">Live</span>
+          </div>
+          <span className="text-[10px] text-slate-500 font-mono">{clock}</span>
+          <div className="h-4 w-px bg-white/10" />
+          <span className="text-[10px] text-slate-500 font-mono">Binance · Kafka · ClickHouse</span>
         </div>
       </header>
 

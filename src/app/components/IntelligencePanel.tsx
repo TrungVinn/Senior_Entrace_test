@@ -3,8 +3,8 @@ import { usePolling } from '../hooks/usePolling';
 import { api, AISignal, AnomalyItem, MarketRegimeItem } from '../lib/api';
 
 export function IntelligencePanel() {
-  const { data: signals } = usePolling(() => api.getAISignals(), 15000);
-  const { data: anomalies } = usePolling(() => api.getAnomalies(), 15000);
+  const { data: signals } = usePolling(() => api.getAISignals(), 10000);
+  const { data: anomalies } = usePolling(() => api.getAnomalies(), 10000);
   const { data: regimes } = usePolling(() => api.getRegime(), 30000);
 
   return (

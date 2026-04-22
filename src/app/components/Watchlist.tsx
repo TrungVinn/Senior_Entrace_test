@@ -15,7 +15,7 @@ interface WatchlistProps {
 }
 
 export function Watchlist({ activeSymbol, onSelect }: WatchlistProps) {
-  const { data: liveData } = usePolling(() => api.getMarketOverview(), 10000);
+  const { data: liveData, lastUpdated } = usePolling(() => api.getMarketOverview(), 2000);
 
   const rows = (liveData ?? []).map((item: MarketOverviewItem) => ({
     sym: item.symbol,
@@ -30,7 +30,15 @@ export function Watchlist({ activeSymbol, onSelect }: WatchlistProps) {
       <div className="flex justify-between items-center px-4 py-3 border-b border-white/5 bg-[#080b13] shrink-0">
         <span className="font-bold text-white text-xs tracking-widest uppercase">Watchlist</span>
         {liveData && (
-          <span className="text-[9px] text-emerald-400 font-mono animate-pulse">LIVE</span>
+          <div className="flex items-center gap-1.5">
+            <span className="relative flex h-1.5 w-1.5">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
+            </span>
+            <span className="text-[9px] text-emerald-400 font-mono">
+              {lastUpdated ? lastUpdated.toLocaleTimeString() : 'LIVE'}
+            </span>
+          </div>
         )}
       </div>
 

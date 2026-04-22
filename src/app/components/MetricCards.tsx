@@ -7,9 +7,9 @@ interface Props {
 }
 
 export function MetricCards({ symbol }: Props) {
-  const { data: overview } = usePolling(() => api.getMarketOverview(), 10000);
-  const { data: signals } = usePolling(() => api.getAISignals(), 15000);
-  const { data: klines } = usePolling(() => api.getKlines(symbol, 60), 30000, [symbol]);
+  const { data: overview } = usePolling(() => api.getMarketOverview(), 2000);
+  const { data: signals } = usePolling(() => api.getAISignals(), 10000);
+  const { data: klines } = usePolling(() => api.getKlines(symbol, 60), 3000, [symbol]);
 
   const row = overview?.find((r: MarketOverviewItem) => r.symbol === symbol);
   const signal = signals?.find((s: AISignal) => s.symbol === symbol);

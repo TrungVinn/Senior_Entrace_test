@@ -1,17 +1,14 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 
-/**
- * Hook that polls an async fetcher at a given interval.
- * Returns { data, error, loading }.
- */
 export function usePolling<T>(
   fetcher: () => Promise<T>,
-  intervalMs = 15000,
+  intervalMs = 2000,
   deps: unknown[] = [],
 ) {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const fetcherRef = useRef(fetcher);
   fetcherRef.current = fetcher;
 
@@ -20,6 +17,7 @@ export function usePolling<T>(
       const result = await fetcherRef.current();
       setData(result);
       setError(null);
+      setLastUpdated(new Date());
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Unknown error');
     } finally {
@@ -34,5 +32,5 @@ export function usePolling<T>(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refresh, intervalMs, ...deps]);
 
-  return { data, error, loading };
+  return { data, error, loading, lastUpdated };
 }

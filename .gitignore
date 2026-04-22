@@ -1,6 +1,12 @@
 # .codex
 .codex
 
+# Kafka / Aiven certificates — never commit
+jobs/*.pem
+jobs/*.cert
+jobs/*.key
+jobs/certs/
+
 # Python
 __pycache__/
 *.py[cod]

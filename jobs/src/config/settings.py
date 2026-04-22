@@ -9,18 +9,15 @@ load_dotenv()
 DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://postgres:postgres@localhost:5432/trading_db')
 
 # =============================================================================
-# Redis — message broker (replacing Kafka) + cache
+# Kafka — Aiven managed broker
 # =============================================================================
-REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379')
-REDIS_HOST = os.getenv('REDIS_HOST', 'localhost')
-REDIS_PORT = int(os.getenv('REDIS_PORT', '6379'))
-REDIS_PASSWORD = os.getenv('REDIS_PASSWORD', '')
-REDIS_SSL = os.getenv('REDIS_SSL', 'false').lower() in ('true', '1', 'yes')
-
-# Stream settings
-REDIS_STREAM_KEY = os.getenv('REDIS_STREAM_KEY', 'binance_market_data')
-REDIS_CONSUMER_GROUP = os.getenv('REDIS_CONSUMER_GROUP', 'market_processor')
-REDIS_MAXLEN = int(os.getenv('REDIS_MAXLEN', '100000'))
+KAFKA_BOOTSTRAP_SERVERS = os.getenv('KAFKA_BOOTSTRAP_SERVERS', '')
+KAFKA_TOPIC             = os.getenv('KAFKA_TOPIC', 'binance_market_data')
+KAFKA_CONSUMER_GROUP    = os.getenv('KAFKA_CONSUMER_GROUP', 'market_processor')
+KAFKA_AUTO_OFFSET_RESET = os.getenv('KAFKA_AUTO_OFFSET_RESET', 'earliest')
+KAFKA_SSL_CA            = os.getenv('KAFKA_SSL_CA', '/app/certs/ca.pem')
+KAFKA_SSL_CERT          = os.getenv('KAFKA_SSL_CERT', '/app/certs/service.cert')
+KAFKA_SSL_KEY           = os.getenv('KAFKA_SSL_KEY', '/app/certs/service.key')
 
 # =============================================================================
 # ClickHouse Cloud
@@ -45,10 +42,10 @@ BINANCE_WS_BASE = 'wss://stream.binance.com:9443'
 # =============================================================================
 # Stream Processor
 # =============================================================================
-STREAM_BATCH_SIZE = int(os.getenv('STREAM_BATCH_SIZE', '500'))
-STREAM_BLOCK_MS = int(os.getenv('STREAM_BLOCK_MS', '5000'))
+STREAM_BATCH_SIZE          = int(os.getenv('STREAM_BATCH_SIZE', '500'))
+STREAM_POLL_TIMEOUT_S      = float(os.getenv('STREAM_POLL_TIMEOUT_S', '5.0'))
 STREAM_PROCESSING_INTERVAL = os.getenv('STREAM_PROCESSING_INTERVAL', '10 seconds')
-SPARK_CHECKPOINT_DIR = os.getenv('SPARK_CHECKPOINT_DIR', '/dbfs/checkpoints/stream_processor')
+SPARK_CHECKPOINT_DIR       = os.getenv('SPARK_CHECKPOINT_DIR', '/dbfs/checkpoints/stream_processor')
 
 # =============================================================================
 # WebSocket reconnect

@@ -19,20 +19,19 @@ import json
 import signal
 import sys
 import time
-from datetime import datetime, timezone
 
 import pandas as pd
 import clickhouse_connect
+from confluent_kafka import Consumer, KafkaError
 
 from config.settings import (
-    REDIS_HOST, REDIS_PORT, REDIS_PASSWORD, REDIS_SSL,
-    REDIS_STREAM_KEY, REDIS_CONSUMER_GROUP,
+    KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC, KAFKA_CONSUMER_GROUP,
+    KAFKA_AUTO_OFFSET_RESET, KAFKA_SSL_CA, KAFKA_SSL_CERT, KAFKA_SSL_KEY,
     CLICKHOUSE_HOST, CLICKHOUSE_PORT, CLICKHOUSE_USER,
     CLICKHOUSE_PASSWORD, CLICKHOUSE_DATABASE, CLICKHOUSE_SECURE,
-    STREAM_BATCH_SIZE, STREAM_BLOCK_MS,
+    STREAM_BATCH_SIZE, STREAM_POLL_TIMEOUT_S,
 )
 from utils.logger import setup_logger
-from utils.redis_client import get_redis_client
 from common.features import add_all_features_pandas
 
 logger = setup_logger("stream.processor_standalone")
@@ -65,27 +64,26 @@ CLICKHOUSE_COLUMNS = [
 # ---------------------------------------------------------------------------
 
 class StandaloneProcessor:
-    """Pure Python stream processor: Redis Streams → Pandas → ClickHouse."""
+    """Pure Python stream processor: Kafka (Aiven) → Pandas → ClickHouse."""
 
     def __init__(self):
-        self.redis_client = get_redis_client()
+        self.consumer = Consumer({
+            'bootstrap.servers':        KAFKA_BOOTSTRAP_SERVERS,
+            'security.protocol':        'SSL',
+            'ssl.ca.location':          KAFKA_SSL_CA,
+            'ssl.certificate.location': KAFKA_SSL_CERT,
+            'ssl.key.location':         KAFKA_SSL_KEY,
+            'group.id':                 KAFKA_CONSUMER_GROUP,
+            'auto.offset.reset':        KAFKA_AUTO_OFFSET_RESET,
+            'enable.auto.commit':       False,
+        })
+        self.consumer.subscribe([KAFKA_TOPIC])
         self.ch_client = None
-        self.consumer_name = "standalone-worker-1"
         self.total_processed = 0
-        self._ensure_consumer_group()
-
-    def _ensure_consumer_group(self):
-        """Create consumer group if it doesn't exist."""
-        try:
-            self.redis_client.xgroup_create(
-                REDIS_STREAM_KEY, REDIS_CONSUMER_GROUP, id="0", mkstream=True,
-            )
-            logger.info("Created consumer group '%s'", REDIS_CONSUMER_GROUP)
-        except Exception as e:
-            if "BUSYGROUP" in str(e):
-                logger.info("Consumer group '%s' already exists", REDIS_CONSUMER_GROUP)
-            else:
-                raise
+        logger.info(
+            "Kafka consumer subscribed | topic=%s group=%s brokers=%s",
+            KAFKA_TOPIC, KAFKA_CONSUMER_GROUP, KAFKA_BOOTSTRAP_SERVERS,
+        )
 
     def _get_clickhouse(self):
         """Lazy ClickHouse connection."""
@@ -101,31 +99,25 @@ class StandaloneProcessor:
             logger.info("Connected to ClickHouse at %s:%s", CLICKHOUSE_HOST, CLICKHOUSE_PORT)
         return self.ch_client
 
-    def _read_batch(self) -> tuple[list[dict], list[str]]:
-        """Read a batch of messages from Redis Streams."""
-        messages = self.redis_client.xreadgroup(
-            groupname=REDIS_CONSUMER_GROUP,
-            consumername=self.consumer_name,
-            streams={REDIS_STREAM_KEY: ">"},
-            count=STREAM_BATCH_SIZE,
-            block=STREAM_BLOCK_MS,
+    def _read_batch(self) -> tuple[list[dict], list]:
+        """Read a batch of messages from Kafka."""
+        messages = self.consumer.consume(
+            num_messages=STREAM_BATCH_SIZE,
+            timeout=STREAM_POLL_TIMEOUT_S,
         )
-
-        records, msg_ids = [], []
-        if not messages:
-            return records, msg_ids
-
-        for _stream_name, stream_messages in messages:
-            for msg_id, data in stream_messages:
-                try:
-                    record = json.loads(data["data"])
-                    records.append(record)
-                    msg_ids.append(msg_id)
-                except (json.JSONDecodeError, KeyError) as e:
-                    logger.warning("Skipping malformed message %s: %s", msg_id, e)
-                    self.redis_client.xack(REDIS_STREAM_KEY, REDIS_CONSUMER_GROUP, msg_id)
-
-        return records, msg_ids
+        records, offsets = [], []
+        for msg in messages:
+            if msg.error():
+                if msg.error().code() != KafkaError._PARTITION_EOF:
+                    logger.warning("Kafka error: %s", msg.error())
+                continue
+            try:
+                record = json.loads(msg.value())
+                records.append(record)
+                offsets.append(msg)
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.warning("Skipping malformed message: %s", e)
+        return records, offsets
 
     def _process_and_write(self, records: list[dict]) -> int:
         """Convert to DataFrame, compute features, write to ClickHouse."""
@@ -152,10 +144,10 @@ class StandaloneProcessor:
 
         return len(data)
 
-    def _ack_messages(self, msg_ids: list[str]):
-        """ACK processed messages in Redis."""
-        if msg_ids:
-            self.redis_client.xack(REDIS_STREAM_KEY, REDIS_CONSUMER_GROUP, *msg_ids)
+    def _ack_messages(self, offsets: list):
+        """Commit offsets to Kafka after successful processing."""
+        if offsets:
+            self.consumer.commit(message=offsets[-1])
 
     def process_one_batch(self) -> int:
         """Process a single micro-batch. Returns number of records processed."""
@@ -172,13 +164,13 @@ class StandaloneProcessor:
     def run(self):
         """Main loop — process batches until shutdown signal."""
         logger.info(
-            "Standalone processor started | Redis=%s:%s stream=%s group=%s",
-            REDIS_HOST, REDIS_PORT, REDIS_STREAM_KEY, REDIS_CONSUMER_GROUP,
+            "Standalone processor started | Kafka=%s topic=%s group=%s",
+            KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC, KAFKA_CONSUMER_GROUP,
         )
         logger.info(
-            "ClickHouse=%s:%s db=%s | batch_size=%d block_ms=%d",
+            "ClickHouse=%s:%s db=%s | batch_size=%d poll_timeout=%.1fs",
             CLICKHOUSE_HOST, CLICKHOUSE_PORT, CLICKHOUSE_DATABASE,
-            STREAM_BATCH_SIZE, STREAM_BLOCK_MS,
+            STREAM_BATCH_SIZE, STREAM_POLL_TIMEOUT_S,
         )
 
         batch_num = 0
@@ -209,8 +201,7 @@ class StandaloneProcessor:
 
     def stop(self):
         """Clean up connections."""
-        if self.redis_client:
-            self.redis_client.close()
+        self.consumer.close()
         if self.ch_client:
             self.ch_client.close()
         logger.info("Connections closed")
