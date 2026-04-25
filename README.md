@@ -6,7 +6,7 @@ End-to-end crypto market data platform: real-time ingestion → feature engineer
 
 ## Demo
 
-<video src="Demo_XNO.mp4" controls width="100%"></video>
+[![Demo Video](https://img.youtube.com/vi/QDGb_1cHhuU/maxresdefault.jpg)](https://www.youtube.com/watch?v=QDGb_1cHhuU)
 
 > Full walkthrough of all dashboard tabs: live crypto chart, Intelligence panel with AI signals + Market Story, AI Market Screener, What-If Simulator, and VN Equities shell.
 
