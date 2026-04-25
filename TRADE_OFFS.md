@@ -1,179 +1,173 @@
 # Architecture Trade-offs & Design Decisions
 
-## 1. Why Redis Streams over Kafka?
+## 1. Why Kafka on Aiven over Redis Streams?
 
-### Decision: Redis Streams as message broker
+### Decision: managed Kafka as the message broker
 
-| Criteria | Redis Streams | Confluent Kafka | RabbitMQ |
-|----------|--------------|-----------------|----------|
-| **Setup complexity** | Low (single service) | High (ZooKeeper/KRaft + brokers) | Medium |
-| **Operational cost** | Free tier 30MB; ~$5/mo small | $0.11/CKU-hour (~$80/mo min) | ~$15/mo (CloudAMQP) |
-| **Consumer groups** | Native (XREADGROUP) | Native | Competing consumers pattern |
-| **Ordering** | Per-stream guaranteed | Per-partition guaranteed | Per-queue (with limits) |
-| **Persistence** | AOF/RDB + MAXLEN trim | Log-based, configurable retention | Ack-based |
-| **Throughput** | ~500K msg/s (single node) | ~1M+ msg/s (clustered) | ~50K msg/s |
-| **Backpressure** | MAXLEN auto-trim | Partition-based, consumer lag | Queue depth |
-| **Spark connector** | None (use foreachBatch) | Native structured streaming | None |
-| **Monitoring** | Redis INFO, RedisInsight | Confluent Cloud UI, JMX | Management UI |
+| Criteria | Kafka on Aiven | Redis Streams | RabbitMQ |
+|----------|----------------|---------------|----------|
+| Setup | Managed service, SSL certs from Aiven | Simple single service | Managed or self-hosted |
+| Consumer groups | Native, mature | Native, lighter-weight | Competing consumers |
+| Replay / retention | Strong log retention model | Limited by memory / trimming | Queue-oriented |
+| Monitoring | Kafka UI, Aiven metrics, consumer lag | RedisInsight, stream length | Management UI |
+| Scale path | Partitions and multiple consumers | Good for small streams | Good work queue |
+| Cost / ops | Higher than Redis, lower ops burden than self-hosted Kafka | Lowest cost | Moderate |
 
-### Why Redis wins for this use case:
-1. **Scale fit**: Binance kline data for 5-10 symbols at 1m interval = ~10 msg/sec. Redis handles this trivially.
-2. **Operational simplicity**: One service for both message broker + cache (if needed later).
-3. **Cost**: Free tier is sufficient for development; $5-10/mo for production vs $80+/mo for Confluent Cloud.
-4. **Consumer groups**: Redis Streams consumer groups provide the same semantics as Kafka consumer groups (ACK, pending messages, consumer failover).
-5. **Already in stack**: The template already includes Redis as a dependency.
+Kafka is heavier than Redis Streams, but it gives the submission a clearer production story: durable log, consumer lag, replayability, SSL/TLS-managed broker, and easier fanout if more downstream consumers are added later.
 
-### When to upgrade to Kafka:
-- >100 symbols or tick-level (trade) data (>10K msg/s sustained)
-- Multi-consumer fanout to 5+ independent consumers
-- Need for exactly-once semantics with transactional producers
-- Regulatory requirement for long-term message retention (>7 days)
+### Why Kafka fits this project
+
+1. **At-least-once stream processing**: producer publishes keyed messages; processor commits offsets only after ClickHouse insert.
+2. **Replayability**: recent topic history can be replayed to rebuild ClickHouse rows or test feature changes.
+3. **Operational visibility**: Kafka UI exposes topic throughput and consumer lag, which is easy to explain in a demo.
+4. **Upgrade path**: more symbols, extra consumers, and additional AI jobs can be added without changing the producer contract.
+
+### Why Redis Streams was rejected
+
+Redis Streams would be cheaper and simpler for 5 symbols at 1m candles, but it is less compelling for message retention and replay in a market data system demo. The current code uses Kafka in `stream/producer.py`, `stream/processor_standalone.py`, Docker, and `.env.example`.
 
 ---
 
-## 2. Why Micro-batch (foreachBatch) over Direct WebSocket to Spark?
+## 2. Why Micro-batch Processor over Direct Writes?
 
-### Decision: Rate source + foreachBatch pattern
+### Decision: producer and processor are decoupled
 
-**Option A (Chosen): WebSocket → Redis → Spark foreachBatch**
 ```
-Binance WS → Producer → Redis Streams → Spark (rate source + foreachBatch) → ClickHouse
-```
-
-**Option B (Rejected): WebSocket directly to Spark custom receiver**
-```
-Binance WS → Spark Custom Receiver → Spark Processing → ClickHouse
+Binance WS → Producer → Kafka → Processor → ClickHouse
 ```
 
-### Comparison:
+Alternative:
 
-| Aspect | Redis + foreachBatch | Direct WS to Spark |
-|--------|---------------------|-------------------|
-| **Decoupling** | Producer and processor are independent | Tightly coupled |
-| **Buffer** | Redis buffers during Spark restarts | Messages lost during restarts |
-| **Failure recovery** | Consumer group tracks position | Must re-establish WS connection |
-| **Scaling** | Multiple producers, multiple consumers | One receiver per stream |
-| **Complexity** | Moderate (extra Redis hop) | High (custom Spark Source API) |
-| **Latency** | +10-50ms (Redis round-trip) | Minimal |
-| **Checkpointing** | Spark checkpoints + Redis ACK | Spark checkpoints only |
-| **Testability** | Can test each component in isolation | Must test end-to-end |
+```
+Binance WS → Producer → ClickHouse
+```
 
-### Why foreachBatch over native Spark source:
-1. **No native Redis Streams connector**: Unlike Kafka, there's no official Spark Structured Streaming source for Redis Streams.
-2. **Reliability**: If Spark restarts, Redis retains unACK'd messages in the consumer group's PEL (Pending Entries List).
-3. **Separation of concerns**: Producer can run on a lightweight container; processor runs on Databricks with Spark.
-4. **Rate source as clock**: The Spark "rate" source serves purely as a micro-batch trigger. Actual data reads happen in foreachBatch from Redis, giving full control over batching logic.
+| Aspect | Kafka + Processor | Direct Writes |
+|--------|-------------------|---------------|
+| Failure recovery | Kafka retains messages until consumed | Producer must handle all retry logic |
+| Backpressure | Consumer lag is visible | Backpressure hits WebSocket process |
+| Feature generation | Centralized in processor | Mixed into producer |
+| Reprocessing | Replay topic offsets | Needs separate historical path |
+| Complexity | More moving parts | Simpler but less resilient |
+
+The processor is the correct place to normalize records, deduplicate, compute features, write to ClickHouse, and commit offsets.
 
 ---
 
 ## 3. ClickHouse ReplacingMergeTree for Idempotency
 
 ### Why ReplacingMergeTree?
-- **Deduplication on merge**: Rows with the same `ORDER BY` key `(symbol, timestamp)` are deduplicated during background merges.
-- **`ingestion_time` as version**: The latest `ingestion_time` wins, so re-processing a batch is safe.
-- **Query with `FINAL`**: `SELECT * FROM market_klines_stream FINAL` returns deduplicated results.
 
-### Alternative considered: CollapsingMergeTree
-- More complex (requires sign column)
-- Better for mutable data with updates/deletes
-- Overkill for append-mostly kline data
+- Rows are keyed by `(symbol, timestamp)`.
+- `ingestion_time` acts as the version column.
+- Reprocessing the same candle writes a newer replacement row.
+- Backend uses `FINAL` where deduplicated reads matter.
 
-### Alternative considered: PostgreSQL with UPSERT
-- Simpler writes (ON CONFLICT DO UPDATE)
-- But: much slower for analytical queries (no columnar storage)
-- ClickHouse is 10-100x faster for aggregation queries on time-series data
+### Alternatives considered
+
+| Alternative | Why not |
+|-------------|---------|
+| PostgreSQL UPSERT | Simpler, but weaker for analytical time-series scans |
+| TimescaleDB | Good time-series ergonomics but less efficient for columnar OLAP |
+| CollapsingMergeTree | More complex than needed for append-mostly candle data |
 
 ---
 
-## 4. Monitoring Strategy
+## 4. Batch vs Stream Features
 
-### Redis Monitoring
-```bash
-# Stream length (should stay bounded by MAXLEN)
-redis-cli XLEN binance_market_data
+Both batch-style and stream-style paths share `jobs/src/common/features.py`.
 
-# Consumer group lag (pending messages not yet ACK'd)
-redis-cli XINFO GROUPS binance_market_data
+| Aspect | Stream Pipeline | Batch / Backfill Path |
+|--------|-----------------|-----------------------|
+| Source | Binance WebSocket through Kafka | Binance REST / historical fetch |
+| Frequency | Continuous micro-batches | Scheduled or manual |
+| Strength | Live dashboard | Full historical context |
+| Limitation | Rolling windows only see current batch in current implementation | Slower, not real-time |
 
-# Detailed consumer info
-redis-cli XINFO CONSUMERS binance_market_data market_processor
+Known limitation: current Pandas stream processing computes rolling windows inside the current micro-batch. For production accuracy, the processor should join recent historical candles from ClickHouse, keep per-symbol state, or run periodic backfills to repair features.
 
-# Memory usage
-redis-cli INFO memory
+---
+
+## 5. AI Post-processing Strategy
+
+The AI layer is intentionally interpretable:
+
+- **Signal scoring**: RSI, SMA crossover, and volume components produce `BUY`, `SELL`, or `NEUTRAL`.
+- **Anomaly detection**: Z-score plus Isolation Forest catches unusual price/volume behavior.
+- **Regime classification**: volatility percentiles classify low/medium/high volatility environments.
+
+These outputs are persisted in ClickHouse, exposed by the Go API, and displayed in the Intelligence tab.
+
+Known limitation: current AI jobs use global `LIMIT` queries. For production, select a fixed recent window per symbol, for example with a ClickHouse `row_number() OVER (PARTITION BY symbol ORDER BY timestamp DESC)` pattern.
+
+---
+
+## 6. Frontend Product Decisions
+
+### Intelligence tab
+
+The Intelligence tab is designed for both technical and non-technical users:
+
+- Market Pulse summarizes signal mix, anomaly count, symbol coverage, and AI freshness.
+- Signal Center exposes scores and component breakdowns.
+- Market Story translates market conditions into plain language.
+- Anomaly Timeline and Regime Matrix keep technical details visible.
+- Gemini panel is optional and experimental; it is browser-side and should be moved server-side before public deployment.
+
+### Simulator tab
+
+The Simulator tab deliberately avoids AI. It answers a concrete user question: "If I bought this coin N candles ago, what would it be worth now?"
+
+It uses Binance public REST directly because it needs flexible intervals (`1m`, `5m`, `15m`, `30m`, `1h`, `4h`, `1d`) that are broader than the backend's current stored 1m stream. This improves demo value without complicating the backend.
+
+---
+
+## 7. Monitoring Strategy
+
+### Kafka
+
+- Topic message rate.
+- Consumer group lag for `market_processor`.
+- Consumer restart/error rate.
+
+Kafka UI runs at:
+
+```text
+http://localhost:8090
 ```
 
-### Spark UI (Databricks)
-- **Streaming tab**: Shows micro-batch progress, processing time, input rate
-- **Key metrics**:
-  - `inputRowsPerSecond` — should match producer rate
-  - `processedRowsPerSecond` — should be >= input rate
-  - `batchDuration` — should be < trigger interval (10s)
+### ClickHouse
 
-### ClickHouse System Tables
 ```sql
--- Query performance
-SELECT query, elapsed, read_rows, read_bytes
-FROM system.query_log
-WHERE type = 'QueryFinish'
-  AND query LIKE '%market_klines_stream%'
-ORDER BY event_time DESC
-LIMIT 20;
-
--- Table size
 SELECT
-    table,
-    formatReadableSize(sum(bytes_on_disk)) AS size,
-    sum(rows) AS rows,
-    count() AS parts
-FROM system.parts
-WHERE database = 'default'
-  AND table LIKE 'market%'
-  AND active
-GROUP BY table;
-
--- Stream lag (data freshness)
-SELECT
-    symbol,
-    max(timestamp) AS latest_kline,
-    dateDiff('second', max(timestamp), now()) AS lag_seconds
+  symbol,
+  max(timestamp) AS latest_kline,
+  dateDiff('second', max(timestamp), now()) AS lag_seconds
 FROM market_klines_stream FINAL
 GROUP BY symbol;
+
+SELECT
+  table,
+  formatReadableSize(sum(bytes_on_disk)) AS size,
+  sum(rows) AS rows
+FROM system.parts
+WHERE database = 'default'
+  AND active
+GROUP BY table;
 ```
 
-### Alerting Recommendations
-| Metric | Threshold | Action |
-|--------|-----------|--------|
-| Redis stream length | > 50K (50% of MAXLEN) | Check if processor is consuming |
-| Consumer group pending | > 1000 | Processor may be slow or down |
-| Spark batch duration | > 10s (trigger interval) | Scale up cluster or reduce batch size |
-| ClickHouse lag | > 60s | Check Spark processor status |
-| Producer WebSocket reconnects | > 5/hour | Check network / Binance API status |
+### Backend / Frontend
+
+- `/health` reports backend status and ClickHouse connection state.
+- Intelligence tab marks AI output as stale if latest signal timestamp is older than 5 minutes.
 
 ---
 
-## 5. Batch vs Stream Pipeline Integration
+## 8. Known Limitations & Future Improvements
 
-Both pipelines share:
-- **Same feature logic**: `common/features.py` (SMA, RSI, volatility, returns, VWAP)
-- **Same ClickHouse schema**: Both write to tables with the same column layout
-- **Same config pattern**: `config/settings.py` with env vars
-
-| Aspect | Batch Pipeline | Stream Pipeline |
-|--------|---------------|-----------------|
-| **Source** | Binance REST API (historical) | Binance WebSocket (real-time) |
-| **Frequency** | Scheduled (hourly/daily) | Continuous (10s micro-batch) |
-| **Data range** | Full history backfill | Latest klines only |
-| **Feature accuracy** | Full window context | Limited by batch size |
-| **Use case** | Backfill, reprocessing, ML training | Real-time dashboard, alerts |
-
----
-
-## 6. Known Limitations & Future Improvements
-
-1. **Feature accuracy in streaming**: Window functions (SMA-99, RSI-14) in micro-batches only see the current batch. For production accuracy, consider joining with recent historical data from ClickHouse before computing features.
-
-2. **Single consumer**: Current design uses one Spark consumer. For higher throughput, add more consumers to the group with different `consumer_name` values.
-
-3. **Redis Cloud memory**: Free tier is 30MB. At ~1KB/message and MAXLEN=100K, this uses ~100MB. For production, size Redis appropriately.
-
-4. **No exactly-once**: Redis Streams provides at-least-once delivery. ClickHouse's ReplacingMergeTree handles duplicates, but `FINAL` queries have a performance cost. Run `OPTIMIZE TABLE ... FINAL` periodically in production.
+1. **Rolling feature accuracy**: join recent historical rows or keep rolling state per symbol.
+2. **AI query sampling**: change global `LIMIT` queries to per-symbol windows.
+3. **Gemini key exposure**: move LLM calls behind Go backend for public deployments.
+4. **Placeholder tabs**: VN Equities, Overview, Order Book, Market Overview, and NewsPanel are UI shells; the current production data path is crypto.
+5. **Type checking**: Vite build passes, but the repo does not currently include `typescript` or a `tsc --noEmit` script.
+6. **Simulator source split**: Simulator uses Binance REST directly, while charts use backend ClickHouse data. This is intentional for interval flexibility but should be documented in demos.

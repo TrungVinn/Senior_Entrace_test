@@ -1,60 +1,76 @@
 # XNO Quant — Market Data System
 
-End-to-end market data system: real-time ingestion, feature engineering, AI post-processing, and visualization.
+End-to-end crypto market data system: real-time ingestion, feature engineering, AI post-processing, and an interactive dashboard for both technical and non-technical users.
 
 ## Architecture
 
 ```
-                                                    ┌─────────────────┐
-                                                    │   Frontend      │
-                                                    │   React + Vite  │
-                                                    │   :5173         │
-                                                    └───────┬─────────┘
-                                                            │ /api proxy
-                                                    ┌───────▼─────────┐
-                                                    │   Go Backend    │
-                                                    │   Fiber :8080   │
-                                                    └───────┬─────────┘
-                                                            │ raw SQL
-                              ┌──────────────────────────────▼──────────────────┐
+                                                    ┌──────────────────────────┐
+                                                    │ Frontend                 │
+                                                    │ React + Vite :5173       │
+                                                    │ Charts, Intelligence,    │
+                                                    │ What-if Simulator        │
+                                                    └────────────┬─────────────┘
+                                                                 │ /api proxy
+                                                    ┌────────────▼─────────────┐
+                                                    │ Go Backend               │
+                                                    │ Fiber :8080, raw SQL     │
+                                                    └────────────┬─────────────┘
+                                                                 │ ClickHouse SQL
+                               ┌─────────────────────────────────▼──────────────┐
 Binance WS ──► Producer ──► Kafka (Aiven) ──► Processor ──► ClickHouse Cloud   │
-  (kline 1m)   (Python)      (SSL/TLS)        (Pandas)      │ market_klines    │
-               aiokafka       :11355                        │ market_ai_signals│
-                              confluent-kafka   AI Runner ──► │ market_anomalies │
-                              kafka-ui :8090   (Python)      │ market_regimes   │
-                                                            └──────────────────┘
+  kline_1m      aiokafka       SSL/TLS         Pandas        market_klines     │
+                                              micro-batch     market_latest     │
+                                              AI Runner ───► market_ai_signals │
+                                                             market_anomalies   │
+                                                             market_regimes     │
+                               └────────────────────────────────────────────────┘
 ```
+
+The main data path is Binance WebSocket → Kafka → Python processor → ClickHouse → Go API → React dashboard. The Simulator tab additionally uses Binance REST from the browser to fetch historical candles for user-selected intervals.
 
 ## Tech Stack
 
 | Layer | Technology | Purpose |
-|-------|-----------|---------|
-| Data Source | Binance WebSocket | Real-time kline (1m) for 5 crypto pairs |
-| Message Broker | Kafka (Aiven managed) | SSL/TLS, consumer groups, at-least-once delivery |
-| Stream Processor | Python + Pandas | Micro-batch: Kafka → features → ClickHouse |
-| OLAP Database | ClickHouse Cloud | ReplacingMergeTree, materialized views |
+|-------|------------|---------|
+| Data Source | Binance WebSocket + REST | Real-time 1m stream and simulator historical candles |
+| Message Broker | Kafka on Aiven | SSL/TLS, consumer groups, at-least-once delivery |
+| Stream Processor | Python + Pandas | Micro-batch Kafka → features → ClickHouse |
+| OLAP Database | ClickHouse Cloud | ReplacingMergeTree, materialized views, time-series analytics |
 | AI Engineering | Python + scikit-learn | Signal scoring, anomaly detection, regime classification |
-| Backend API | Go + Fiber v3 | Raw SQL (no ORM), serves ClickHouse data |
-| Frontend | React + Vite + Tailwind | Lightweight-charts, Radix UI, real-time polling |
-| DevOps | Docker + docker-compose | One-command local startup |
+| Backend API | Go + Fiber v3 | Raw SQL via `database/sql` + `clickhouse-go/v2` |
+| Frontend | React + Vite + Tailwind | Lightweight Charts, Recharts, resizable dashboard panels |
+| DevOps | Docker + docker-compose | Service packaging and local orchestration |
+
+## Product Surface
+
+- **Crypto X**: live watchlist and candlestick chart fed by the backend.
+- **Intelligence**: market pulse, signal center, regime matrix, anomaly timeline, Market Story, and optional Gemini LLM signal panel.
+- **Simulator**: "What If I Bought" experience using Binance REST candles. Users choose symbol, investment amount, candle interval, candles ago, and entry price mode (`open`, `high`, `low`, `close`, `average`) to see current value, PnL, best/worst moments, and a portfolio-value chart.
+- **VN Equities / Overview**: UI shell and placeholder panels for future expansion; current real pipeline is crypto-focused.
 
 ## Quick Start
 
-### Option 1: Local development (with cloud databases)
+### Option 1: Local development with cloud Kafka and ClickHouse
 
 ```bash
-# 1. Clone and configure
 cd fullstackAI
 cp .env.example .env
-# Edit .env with your Kafka (Aiven) + ClickHouse Cloud credentials + cert paths
+# Edit .env with Aiven Kafka, ClickHouse Cloud, and optional Gemini key.
 
-# 2. Start all services
-docker-compose -f docker-compose.yml -f docker-compose.cloud.yml up -d
+docker-compose up -d
 
-# 3. Frontend dev server
 npm install
 npm run dev
-# → http://localhost:5173
+# http://localhost:5173
+```
+
+Place Aiven SSL files in `jobs/` before starting Docker:
+
+```text
+jobs/ca.pem
+jobs/service.cert
+jobs/service.key
 ```
 
 ### Option 2: Run services individually
@@ -78,68 +94,69 @@ npm run dev
 
 ## API Endpoints
 
-### V1 — Market Data (ClickHouse)
+### V1 — Market Data + AI Outputs
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/v1/market/overview` | Latest price + SMA + RSI per symbol |
-| GET | `/api/v1/market/klines?symbol=BTCUSDT&limit=200` | Kline data with features |
+| GET | `/api/v1/ping` | v1 health check |
+| GET | `/api/v1/market/overview` | Latest price, volume, SMA7, RSI14 per symbol |
+| GET | `/api/v1/market/klines?symbol=BTCUSDT&limit=200` | OHLCV candles with feature columns |
 | GET | `/api/v1/market/symbols` | Available symbols |
-| GET | `/api/v1/ai/signals` | AI signal scores (BUY/SELL/NEUTRAL) |
+| GET | `/api/v1/ai/signals` | Signal scores (`BUY`, `SELL`, `NEUTRAL`) |
 | GET | `/api/v1/ai/anomalies` | Detected anomalies |
 | GET | `/api/v1/ai/regime` | Market regime classification |
 
-### V2 — Portfolio
+### V2 — Portfolio Scaffold
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/v2/portfolio/summary` | Portfolio summary |
-| GET | `/api/v2/portfolio/positions` | Position list |
+| GET | `/api/v2/ping` | v2 health check |
+| GET | `/api/v2/portfolio/summary` | Mock portfolio summary |
+| GET | `/api/v2/portfolio/positions` | Mock position list |
 
 ## Data Flow Walkthrough
 
 ```
-1. Binance WS sends kline_1m for BTCUSDT
-   → {"s":"BTCUSDT","k":{"o":"75500","h":"75600","l":"75400","c":"75550","v":"123.4"}}
+1. Binance WS emits kline_1m messages for configured symbols.
 
-2. Producer parses → aiokafka produces to Kafka topic "binance_market_data" (Aiven, SSL)
-   → key=symbol, value=JSON record
+2. Producer parses each kline and sends JSON to Kafka topic "binance_market_data"
+   with the symbol as message key.
 
-3. Processor consumes via confluent-kafka (consumer group "market_processor")
-   → Batch consume up to 500 msgs per cycle
-   → Converts to DataFrame, deduplicates by (symbol, kline_start)
-   → Computes: SMA(7,25,99), RSI(14), volatility(20), VWAP, returns
-   → INSERT into ClickHouse market_klines_stream
-   → Commit offset to Kafka
+3. Processor consumes with confluent-kafka:
+   - Reads up to STREAM_BATCH_SIZE messages per cycle
+   - Deduplicates by (symbol, kline_start)
+   - Computes SMA, RSI, returns, volatility, VWAP
+   - Inserts into ClickHouse market_klines_stream
+   - Commits Kafka offset after successful write
 
-4. AI Runner (every 60s):
-   → Signal Scoring: RSI < 30 → BUY component, SMA bullish → BUY → composite score
-   → Anomaly Detection: Z-score on price/volume, Isolation Forest
-   → Regime Classification: volatility percentile → low/medium/high
+4. ClickHouse materialized view keeps market_latest_price updated.
 
-5. Backend API:
-   → GET /api/v1/market/overview → SELECT FROM market_latest_price FINAL
-# Senior_Entrace_test
-   → GET /api/v1/ai/signals → SELECT FROM market_ai_signals FINAL
+5. AI Runner periodically writes:
+   - market_ai_signals
+   - market_anomalies
+   - market_regimes
 
-6. Frontend:
-   → Watchlist polls /api/v1/market/overview every 2s (live prices)
-   → TradingChart fetches /api/v1/market/klines every 3s (real OHLC candlesticks)
-   → IntelligencePanel fetches /api/v1/ai/signals every 10s (BUY/SELL signals)
+6. Backend serves ClickHouse data through /api/v1.
+
+7. Frontend polls:
+   - Watchlist: /api/v1/market/overview
+   - TradingChart: /api/v1/market/klines
+   - IntelligencePanel: /api/v1/ai/*
+   - Simulator: Binance REST klines directly from the browser
 ```
 
 ## Environment Variables
 
-See [`.env.example`](.env.example) for all configuration options.
+See [`.env.example`](.env.example) for the full list.
 
 Key variables:
-- `KAFKA_BOOTSTRAP_SERVERS` — Aiven Kafka host:port (e.g., `kafka-xxx.aivencloud.com:11355`)
-- `KAFKA_SSL_CA`, `KAFKA_SSL_CERT`, `KAFKA_SSL_KEY` — Aiven SSL certificate file paths
-- `KAFKA_TOPIC`, `KAFKA_CONSUMER_GROUP` — topic and consumer group names
-- `CLICKHOUSE_HOST`, `CLICKHOUSE_PORT`, `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD` — ClickHouse Cloud
-- `BINANCE_SYMBOLS` — Comma-separated symbol pairs (e.g., `btcusdt,ethusdt`)
 
-> **Note:** Place Aiven SSL certs (`ca.pem`, `service.cert`, `service.key`) in `jobs/` — they are gitignored.
+- `KAFKA_BOOTSTRAP_SERVERS` — Aiven Kafka host:port.
+- `KAFKA_TOPIC`, `KAFKA_CONSUMER_GROUP`, `KAFKA_AUTO_OFFSET_RESET` — Kafka runtime config.
+- `KAFKA_SSL_CA`, `KAFKA_SSL_CERT`, `KAFKA_SSL_KEY` — certificate paths used by local non-Docker runs; Docker maps these from `jobs/`.
+- `CLICKHOUSE_HOST`, `CLICKHOUSE_PORT`, `CLICKHOUSE_NATIVE_PORT`, `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`, `CLICKHOUSE_DATABASE`, `CLICKHOUSE_SECURE`.
+- `BINANCE_SYMBOLS`, `BINANCE_INTERVAL`.
+- `VITE_GEMINI_API_KEY` — optional; enables the browser-side Gemini panel in the Intelligence tab. Leave blank to use the rest of the dashboard without LLM calls.
 
 ## Local Services
 
@@ -147,11 +164,19 @@ Key variables:
 |---------|-----|-------|
 | Frontend | http://localhost:5173 | Vite dev server |
 | Backend API | http://localhost:8080 | Go Fiber |
-| Kafka UI | http://localhost:8090 | provectuslabs/kafka-ui — monitor topics & lag |
+| Kafka UI | http://localhost:8090 | Kafka topic and consumer lag monitor |
+
+## Validation
+
+```bash
+npm run build
+cd backend && go test ./...
+cd ../jobs && python -m compileall -q src
+```
 
 ## Documentation
 
-- [`TRADE_OFFS.md`](TRADE_OFFS.md) — Architecture decisions: Kafka vs Redis, micro-batch rationale, monitoring strategy
-- [`CLICKHOUSE_DEEP_DIVE_EN.md`](CLICKHOUSE_DEEP_DIVE_EN.md) — ClickHouse deep-dive: columnar storage, dedup, Redis vs Kafka vs NATS
-- [`SETUP_GUIDE.md`](SETUP_GUIDE.md) — Step-by-step cloud setup (Kafka Aiven, ClickHouse)
-- [`AI.md`](AI.md) — AI tool usage, attribution, prompt engineering examples
+- [`SETUP_GUIDE.md`](SETUP_GUIDE.md) — Aiven Kafka, ClickHouse Cloud, Docker, and local startup.
+- [`TRADE_OFFS.md`](TRADE_OFFS.md) — Architecture decisions and known limitations.
+- [`CLICKHOUSE_DEEP_DIVE_EN.md`](CLICKHOUSE_DEEP_DIVE_EN.md) — ClickHouse deep dive.
+- [`AI.md`](AI.md) — AI tool usage and attribution.

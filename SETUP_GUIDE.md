@@ -1,70 +1,88 @@
 # Stream Pipeline — Setup Guide
 
+This guide matches the current implementation: Binance WebSocket → Kafka on Aiven → Python processor → ClickHouse Cloud → Go backend → React dashboard.
+
 ## Architecture Overview
 
 ```
-Binance WebSocket ──→ Python Producer ──→ Redis Streams ──→ Python Processor ──→ ClickHouse Cloud
-                      (async, reconnect)   (consumer groups)  (Pandas, 10s batch)   (ReplacingMergeTree)
+Binance WebSocket ──→ Python Producer ──→ Kafka (Aiven) ──→ Python Processor ──→ ClickHouse Cloud
+                      aiokafka            SSL/TLS           Pandas micro-batch   ReplacingMergeTree
 ```
+
+The frontend Simulator tab separately calls Binance REST from the browser for historical candles and does not depend on ClickHouse.
 
 ---
 
-## A. Redis Cloud
+## A. Aiven Kafka
 
-### 1. Create Redis Cloud Account
-- Go to [redis.io/cloud](https://redis.io/cloud) → Sign up (free tier available)
-- Create a **Fixed** subscription (free 30MB) or **Flexible** for production
+### 1. Create Kafka Service
 
-### 2. Create Database
-- Region: choose closest to your processor/ClickHouse region
-- Enable **Redis Streams** (enabled by default on Redis 5+)
-- Memory: 30MB (free) or 256MB+ for production
-- Enable **TLS/SSL** (mandatory for cloud)
+- Create an Aiven account.
+- Create a Kafka service in a region close to your processor/ClickHouse service.
+- Note the bootstrap server from the Aiven console, for example:
 
-### 3. Get Connection Details
-After database is created, note down:
-```
-REDIS_HOST=redis-xxxxx.crce194.ap-seast-1-1.ec2.cloud.redislabs.com
-REDIS_PORT=13992
-REDIS_PASSWORD=your_password_here
-REDIS_SSL=true
+```text
+KAFKA_BOOTSTRAP_SERVERS=kafka-xxxxx.aivencloud.com:11355
 ```
 
-### 4. Verify Connection
-```bash
-redis-cli -h {{REDIS_HOST}} -p {{REDIS_PORT}} -a {{REDIS_PASSWORD}} --tls PING
-# Should return: PONG
+### 2. Download SSL Certificates
+
+Download these files from Aiven and place them in `jobs/`:
+
+```text
+jobs/ca.pem
+jobs/service.cert
+jobs/service.key
 ```
 
-### 5. No Topic Creation Needed
-Redis Streams are created automatically on first `XADD`.
-The producer creates the stream `binance_market_data` automatically.
+They are ignored by git.
+
+### 3. Create / Confirm Topic
+
+The default topic is:
+
+```text
+binance_market_data
+```
+
+You can create it in the Aiven console or let the service auto-create it if your Aiven configuration allows auto topic creation.
+
+Recommended settings for this project:
+
+| Setting | Suggested Value |
+|---------|-----------------|
+| Partitions | 3 |
+| Replication | Aiven default |
+| Retention | 1-7 days for development |
+| Cleanup policy | delete |
 
 ---
 
 ## B. ClickHouse Cloud
 
 ### 1. Create Service
-- Go to [clickhouse.cloud](https://clickhouse.cloud/) → Sign up (free trial)
-- Create a service:
-  - Cloud provider: AWS / GCP / Azure
-  - Region: same as Redis Cloud
-  - Tier: Development (free trial) or Production
 
-### 2. Get Connection Details
-```
-CLICKHOUSE_HOST=xxxxxxxx.us-east-1.aws.clickhouse.cloud
-CLICKHOUSE_PORT=8443          # HTTPS port — used by Python services (processor, AI runner)
-CLICKHOUSE_NATIVE_PORT=9440   # Native TCP port — used by Go backend
+- Create a ClickHouse Cloud service.
+- Use the same or nearby region as Kafka.
+- Record:
+
+```text
+CLICKHOUSE_HOST=xxxxxxxx.region.provider.clickhouse.cloud
+CLICKHOUSE_PORT=8443
+CLICKHOUSE_NATIVE_PORT=9440
 CLICKHOUSE_USER=default
 CLICKHOUSE_PASSWORD=your_password_here
 CLICKHOUSE_DATABASE=default
+CLICKHOUSE_SECURE=true
 ```
 
-### 3. Create Schema
-Run **both** SQL scripts against your ClickHouse Cloud — stream tables first, then AI output tables:
+`CLICKHOUSE_PORT=8443` is used by Python `clickhouse-connect`; `CLICKHOUSE_NATIVE_PORT=9440` is used by Go `clickhouse-go/v2`.
+
+### 2. Create Schema
+
+Run both SQL files:
+
 ```bash
-# Option 1: clickhouse-client
 clickhouse-client \
   --host {{CLICKHOUSE_HOST}} \
   --port 9440 \
@@ -82,155 +100,208 @@ clickhouse-client \
   --password {{CLICKHOUSE_PASSWORD}} \
   --database {{CLICKHOUSE_DATABASE}} \
   < sql/clickhouse_ai_schema.sql
-
-# Option 2: ClickHouse Cloud web console
-# Paste contents of sql/clickhouse_schema.sql, execute.
-# Then paste contents of sql/clickhouse_ai_schema.sql, execute.
 ```
 
-`clickhouse_schema.sql` creates: `market_klines_stream`, `market_latest_price`, `market_ohlcv_1h` + 2 materialized views.
-`clickhouse_ai_schema.sql` creates: `market_ai_signals`, `market_anomalies`, `market_regimes` (consumed by the AI runner and backend).
+Or paste the SQL into the ClickHouse Cloud web console.
 
-### 4. Verify Tables
+Expected tables:
+
 ```sql
 SHOW TABLES;
--- Expected: market_klines_stream, market_latest_price, market_ohlcv_1h,
---           market_ai_signals, market_anomalies, market_regimes
-
-DESCRIBE market_klines_stream;
-```
-
-### 5. Grant Permissions (if using separate user)
-```sql
-CREATE USER IF NOT EXISTS stream_writer IDENTIFIED BY '{{PASSWORD}}';
-GRANT INSERT ON default.market_klines_stream TO stream_writer;
-GRANT INSERT ON default.market_latest_price TO stream_writer;
-GRANT INSERT ON default.market_ohlcv_1h TO stream_writer;
-GRANT INSERT ON default.market_ai_signals TO stream_writer;
-GRANT INSERT ON default.market_anomalies TO stream_writer;
-GRANT INSERT ON default.market_regimes TO stream_writer;
-GRANT SELECT ON default.* TO stream_writer;
+-- market_klines_stream
+-- market_latest_price
+-- market_ohlcv_1h
+-- market_ai_signals
+-- market_anomalies
+-- market_regimes
 ```
 
 ---
 
-## C. Producer Deployment
+## C. Environment Configuration
 
-### Option 1: Docker (Local / VM)
 ```bash
 cd fullstackAI
-
-# Copy and edit environment
 cp .env.example .env
-# Edit .env with your Redis Cloud credentials
-
-# Run with docker-compose
-docker-compose up -d producer
-
-# Check logs
-docker-compose logs -f producer
 ```
 
-### Option 2: Cloud Run (GCP)
+Fill in:
+
+```env
+KAFKA_BOOTSTRAP_SERVERS=...
+KAFKA_TOPIC=binance_market_data
+KAFKA_CONSUMER_GROUP=market_processor
+KAFKA_AUTO_OFFSET_RESET=earliest
+
+CLICKHOUSE_HOST=...
+CLICKHOUSE_PORT=8443
+CLICKHOUSE_NATIVE_PORT=9440
+CLICKHOUSE_USER=default
+CLICKHOUSE_PASSWORD=...
+CLICKHOUSE_DATABASE=default
+CLICKHOUSE_SECURE=true
+
+BINANCE_SYMBOLS=btcusdt,ethusdt,bnbusdt,solusdt,xrpusdt
+BINANCE_INTERVAL=1m
+
+# Optional: only for the frontend Gemini panel
+VITE_GEMINI_API_KEY=
+```
+
+For Docker, `docker-compose.yml` maps the certificate files to `/app/certs/*`. For local Python runs from `jobs/src`, set the certificate variables to reachable local paths, for example:
+
+```env
+KAFKA_SSL_CA=../ca.pem
+KAFKA_SSL_CERT=../service.cert
+KAFKA_SSL_KEY=../service.key
+```
+
+---
+
+## D. Docker Startup
+
+```bash
+cd fullstackAI
+docker-compose up -d
+```
+
+Check logs:
+
+```bash
+docker-compose logs -f producer
+docker-compose logs -f processor
+docker-compose logs -f ai-jobs
+docker-compose logs -f backend
+```
+
+Expected signals:
+
+- Producer logs `WebSocket connected` and periodic published-message counts.
+- Processor logs subscribed Kafka topic and processed batches.
+- AI jobs log cycles for signal scoring, anomaly detection, and regime classification.
+- Backend listens on `0.0.0.0:8080`.
+
+---
+
+## E. Local Non-Docker Startup
+
+Install Python dependencies:
+
 ```bash
 cd fullstackAI/jobs
-
-# Build & push
-gcloud builds submit --tag gcr.io/PROJECT_ID/binance-producer
-
-# Deploy
-gcloud run deploy binance-producer \
-  --image gcr.io/PROJECT_ID/binance-producer \
-  --set-env-vars "REDIS_HOST={{REDIS_HOST}},REDIS_PORT={{REDIS_PORT}},REDIS_PASSWORD={{REDIS_PASSWORD}},REDIS_SSL=true" \
-  --min-instances=1 \
-  --max-instances=1 \
-  --cpu=1 \
-  --memory=256Mi \
-  --no-allow-unauthenticated
+pip install -r requirements.txt
 ```
 
-### Option 3: Docker on VM (AWS EC2 / Azure VM)
+Run services:
+
 ```bash
-# SSH into VM
-ssh user@vm-ip
+cd fullstackAI/jobs/src
+python -m stream.producer
+python -m stream.processor_standalone
+python -m ai.runner
+```
 
-# Clone repo
-git clone <repo-url>
+In another terminal:
+
+```bash
+cd fullstackAI/backend
+go run ./cmd/main.go
+```
+
+In another terminal:
+
+```bash
 cd fullstackAI
+npm install
+npm run dev
+```
 
-# Configure
-cp .env.example .env
-vim .env  # add credentials
+Open:
 
-# Run
-docker-compose up -d producer
-
-# Monitor
-docker-compose logs -f producer
+```text
+http://localhost:5173
 ```
 
 ---
 
-## D. Full Pipeline Startup (Local Development)
+## F. Verification
 
-```bash
-cd fullstackAI
+### Kafka
 
-# 1. Start Redis + Producer + Processor + AI jobs + Backend
-docker-compose up -d
+Use Kafka UI:
 
-# 2. Verify producer is running
-docker-compose logs -f producer
-# Should see: "WebSocket connected" and periodic "Published N msgs" logs
-
-# 3. Verify Redis Stream has data
-docker-compose exec redis redis-cli XLEN binance_market_data
-# Should return a number > 0
-
-# 4. Check stream contents
-docker-compose exec redis redis-cli XRANGE binance_market_data - + COUNT 3
-
-# 5. Open RedisInsight (optional)
-# http://localhost:5540
-
-# 6. Verify processor is consuming
-docker-compose logs -f processor
-# Should see: "Batch committed: N rows" logs
-
-# 7. Verify ClickHouse data
-# (Use ClickHouse Cloud console or clickhouse-client)
-# SELECT count() FROM market_klines_stream;
+```text
+http://localhost:8090
 ```
 
-Run standalone (outside Docker):
+Confirm:
+
+- Topic `binance_market_data` receives messages.
+- Consumer group `market_processor` is active.
+- Lag is low or decreasing.
+
+### ClickHouse
+
+```sql
+SELECT count() FROM market_klines_stream FINAL;
+
+SELECT
+  symbol,
+  max(timestamp) AS latest_kline,
+  dateDiff('second', max(timestamp), now()) AS lag_seconds
+FROM market_klines_stream FINAL
+GROUP BY symbol;
+
+SELECT * FROM market_latest_price FINAL ORDER BY symbol;
+SELECT * FROM market_ai_signals FINAL ORDER BY timestamp DESC LIMIT 10;
+```
+
+### Backend
+
 ```bash
-cd jobs/src
-python -m stream.producer              # Terminal 1
-python -m stream.processor_standalone  # Terminal 2
-python -m ai.runner                    # Terminal 3
+curl http://localhost:8080/health
+curl http://localhost:8080/api/v1/market/overview
+curl "http://localhost:8080/api/v1/market/klines?symbol=BTCUSDT&limit=20"
+curl http://localhost:8080/api/v1/ai/signals
+```
+
+### Frontend Build
+
+```bash
+npm run build
 ```
 
 ---
 
-## E. Environment Variables Reference
+## G. Environment Variables Reference
 
 | Variable | Service | Default | Description |
 |----------|---------|---------|-------------|
-| `REDIS_HOST` | Producer, Processor | localhost | Redis server hostname |
-| `REDIS_PORT` | Producer, Processor | 6379 | Redis server port |
-| `REDIS_PASSWORD` | Producer, Processor | (empty) | Redis password |
-| `REDIS_SSL` | Producer, Processor | false | Enable TLS |
-| `REDIS_STREAM_KEY` | Producer, Processor | binance_market_data | Stream name |
-| `REDIS_CONSUMER_GROUP` | Processor | market_processor | Consumer group name |
-| `REDIS_MAXLEN` | Producer | 100000 | Max stream length (auto trim) |
-| `CLICKHOUSE_HOST` | Processor, AI runner, Backend | localhost | ClickHouse hostname |
-| `CLICKHOUSE_PORT` | Processor, AI runner | 8443 | HTTPS port (Python `clickhouse-connect`) |
-| `CLICKHOUSE_NATIVE_PORT` | Backend | 9440 | Native TCP port (Go `clickhouse-go`) |
-| `CLICKHOUSE_USER` | Processor | default | ClickHouse username |
-| `CLICKHOUSE_PASSWORD` | Processor | (empty) | ClickHouse password |
-| `CLICKHOUSE_DATABASE` | Processor | default | ClickHouse database |
-| `BINANCE_SYMBOLS` | Producer | btcusdt,ethusdt | Comma-separated symbols |
-| `BINANCE_INTERVAL` | Producer | 1m | Kline interval |
-| `STREAM_BATCH_SIZE` | Processor | 500 | Messages per micro-batch |
-| `STREAM_PROCESSING_INTERVAL` | Processor | 10 seconds | Micro-batch interval |
-| `LOG_LEVEL` | All | INFO | Logging level |
+| `KAFKA_BOOTSTRAP_SERVERS` | Producer, Processor, Kafka UI | required | Aiven Kafka host:port |
+| `KAFKA_TOPIC` | Producer, Processor | `binance_market_data` | Topic for kline messages |
+| `KAFKA_CONSUMER_GROUP` | Processor | `market_processor` | Consumer group name |
+| `KAFKA_AUTO_OFFSET_RESET` | Processor | `earliest` | Offset reset policy |
+| `KAFKA_SSL_CA` | Producer, Processor | `/app/certs/ca.pem` | CA certificate path |
+| `KAFKA_SSL_CERT` | Producer, Processor | `/app/certs/service.cert` | Client certificate path |
+| `KAFKA_SSL_KEY` | Producer, Processor | `/app/certs/service.key` | Client key path |
+| `CLICKHOUSE_HOST` | Processor, AI runner, Backend | empty | ClickHouse host |
+| `CLICKHOUSE_PORT` | Processor, AI runner | `8443` | HTTPS port for Python |
+| `CLICKHOUSE_NATIVE_PORT` | Backend | `9440` | Native TCP port for Go |
+| `CLICKHOUSE_USER` | Processor, AI runner, Backend | `default` | ClickHouse user |
+| `CLICKHOUSE_PASSWORD` | Processor, AI runner, Backend | empty | ClickHouse password |
+| `CLICKHOUSE_DATABASE` | Processor, AI runner, Backend | `default` | ClickHouse database |
+| `CLICKHOUSE_SECURE` | Processor, AI runner, Backend | `true` | Enable TLS |
+| `BINANCE_SYMBOLS` | Producer | `btcusdt,ethusdt` | Comma-separated stream symbols |
+| `BINANCE_INTERVAL` | Producer | `1m` | WebSocket kline interval |
+| `STREAM_BATCH_SIZE` | Processor | `500` | Kafka messages per batch |
+| `STREAM_POLL_TIMEOUT_S` | Processor | `5.0` | Kafka consume timeout |
+| `VITE_GEMINI_API_KEY` | Frontend | empty | Optional browser-side Gemini panel |
+| `LOG_LEVEL` | Python services | `INFO` | Logging level |
+
+---
+
+## H. Notes
+
+- The core dashboard works without `VITE_GEMINI_API_KEY`; only the Gemini panel will show an API error if used without a key.
+- The Simulator tab uses Binance public REST directly, so it can show historical what-if scenarios even before ClickHouse has long history.
+- For public deployments, move Gemini calls behind the Go backend so the API key is not exposed in the browser bundle.

@@ -1,103 +1,115 @@
 # Project Context — fullstackAI
 
 ## What this is
-An AI developer entrance test submission. Goal: end-to-end market data system from ingestion to a user-facing app. Graded spec is in `REQUIREMENTS.md` — treat it as the source of truth, never rewrite it.
+An AI developer entrance test submission. Goal: end-to-end market data system from ingestion to a user-facing app. Graded spec is in `REQUIREMENTS.md`; treat that file as read-only source material.
 
-## Stack (final — do not re-debate)
+## Stack
 | Layer | Choice | Rejected alternatives |
 |-------|--------|-----------------------|
-| Data source | Binance WebSocket (kline + trade stream) | TradingView, Yahoo Finance |
-| Message broker | Redis Streams (XADD/XREADGROUP) | Kafka, RabbitMQ |
-| Stream processor | Pandas micro-batch (standalone) + Spark foreachBatch (Databricks) | Direct WS→Spark receiver |
+| Data source | Binance WebSocket for realtime klines; Binance REST for Simulator historical candles | TradingView, Yahoo Finance |
+| Message broker | Kafka on Aiven with SSL/TLS (`aiokafka` producer, `confluent-kafka` consumer) | Redis Streams, RabbitMQ |
+| Stream processor | Pandas micro-batch standalone processor; Spark/Databricks variant retained as optional reference | Direct WebSocket receiver inside Spark |
 | Analytics DB | ClickHouse `ReplacingMergeTree` | PostgreSQL, TimescaleDB, Cassandra |
 | Backend | Go + Fiber, raw SQL (`database/sql` + `clickhouse-go/v2`) | GORM, Ent (banned by spec) |
-| AI layer | Python: signal scoring + anomaly detection + regime classification | n/a |
-| Frontend | React + Shadcn UI + Recharts | n/a |
-| DevOps | Docker + docker-compose | n/a |
+| AI layer | Python: signal scoring, anomaly detection, regime classification | Black-box model-only approach |
+| Frontend | React + Vite + Tailwind, Lightweight Charts, Recharts, resizable panels | Static dashboard |
+| DevOps | Docker + docker-compose | Manual multi-terminal only |
 
 ## Hard constraints from spec
-- **No ORM** — raw SQL only (`database/sql`, `sqlx`, `pgx`, or `clickhouse-go`)
-- **Backend must follow template style** — `cmd/main.go`, `internal/config`, `internal/db`, `internal/middlewares`, `internal/v1/...`, `internal/v2/...`, `internal/api`
-- **Template code is off-limits** — do not touch original template files (UI components, backend scaffold, jobs utils). See `AI.md` for the boundary
-- `REQUIREMENTS.md` is the grading brief — never edit it
+- **No ORM** — raw SQL only (`database/sql`, `sqlx`, `pgx`, or `clickhouse-go`).
+- **Backend must follow template style** — `cmd/main.go`, `internal/config`, `internal/db`, `internal/middlewares`, `internal/v1/...`, `internal/v2/...`, `internal/api`.
+- **Template code exists** — avoid broad rewrites of generated Shadcn/UI components and scaffold files unless a feature requires it.
+- `REQUIREMENTS.md` is the grading brief — do not edit it.
 
 ## Directory map
 ```
 fullstackAI/
-├── backend/             # Go Fiber API
-│   ├── cmd/main.go      # entrypoint
+├── backend/
+│   ├── cmd/main.go
 │   └── internal/
-│       ├── v1/          # market data endpoints (handlers/repos/routes)
-│       ├── v2/          # AI signal endpoints
+│       ├── v1/          # market + AI endpoints backed by ClickHouse
+│       ├── v2/          # portfolio mock scaffold
 │       ├── config/      # env bootstrap
-│       ├── db/          # ClickHouse + Redis init
-│       ├── middlewares/ # auth, logging, rate-limit
-│       ├── api/         # shared HTTP response helpers
-│       └── models/      # shared structs
-├── jobs/                # Python data pipeline
+│       ├── db/          # ClickHouse init
+│       ├── middlewares/
+│       ├── api/
+│       └── models/
+├── jobs/
 │   └── src/
-│       ├── stream/      # producer.py (WS→Redis), processor.py (Redis→ClickHouse)
+│       ├── stream/      # producer.py (Binance WS→Kafka), processor_standalone.py (Kafka→ClickHouse)
 │       ├── ai/          # signal_scoring.py, anomaly_detection.py, regime_classification.py
-│       ├── common/      # features.py (SMA, RSI, VWAP, volatility) — shared by batch+stream
-│       └── utils/       # logger.py, database.py (template, do not rewrite)
-├── src/                 # React frontend
-│   ├── app/
-│   │   ├── lib/api.ts       # typed fetch wrapper
-│   │   └── hooks/usePolling.ts
-│   └── imports/         # UI components (mostly template)
+│       ├── common/      # features.py (SMA, RSI, VWAP, volatility)
+│       └── utils/
+├── src/
+│   └── app/
+│       ├── App.tsx
+│       ├── lib/api.ts
+│       ├── hooks/usePolling.ts
+│       └── components/
+│           ├── TradingChart.tsx
+│           ├── Watchlist.tsx
+│           ├── IntelligencePanel.tsx
+│           └── Simulator.tsx
 ├── sql/
-│   ├── clickhouse_schema.sql       # market_klines_stream, market_latest_price
-│   └── clickhouse_ai_schema.sql    # ai_signals, ai_anomalies, ai_regimes
-├── docker-compose.yml   # local full-stack
+│   ├── clickhouse_schema.sql
+│   └── clickhouse_ai_schema.sql
+├── docker-compose.yml
 ├── docker-compose.cloud.yml
-├── REQUIREMENTS.md      # grading spec — read-only
-├── TRADE_OFFS.md        # architecture decisions (Redis vs Kafka, etc.)
-├── CLICKHOUSE_DEEP_DIVE.md     # Vietnamese deep-dive notes (local reading)
-├── CLICKHOUSE_DEEP_DIVE_EN.md  # English version (for GitHub)
-└── AI.md                # AI attribution log
+├── README.md
+├── SETUP_GUIDE.md
+├── TRADE_OFFS.md
+├── AI.md
+└── REQUIREMENTS.md
 ```
 
-## Key architectural decisions (already made)
-1. **Redis Streams not Kafka** — ~10 msg/s from Binance is well within Redis capacity; zero extra infra; Redis already in stack. Upgrade path to Kafka documented in `TRADE_OFFS.md`.
-2. **ClickHouse ReplacingMergeTree** — `ORDER BY (symbol, timestamp)` + `version = ingestion_time`. Dedup via background merge; queries use `FINAL` or `argMax`. Columnar storage means aggregate scans on `volume`/`price` are fast even without index.
-3. **foreachBatch not native Spark source** — no official Redis Streams Spark connector; Redis buffers unACK'd messages in PEL during Spark restarts.
-4. **No ORM** — `database/sql` + `clickhouse-go/v2` with direct SQL strings. Nullable columns use `*float64`.
-5. **AI is post-processing, not real-time ML** — three lightweight models: composite signal score (RSI+SMA+volume), Z-score+IsolationForest anomaly, volatility-percentile regime.
+## Key architectural decisions
+1. **Kafka on Aiven over Redis Streams** — managed broker, SSL/TLS, consumer groups, Kafka UI monitoring, and a clearer upgrade path for more symbols or additional consumers.
+2. **ClickHouse ReplacingMergeTree** — `ORDER BY (symbol, timestamp)` plus `ingestion_time` version supports idempotent reprocessing; backend queries use `FINAL` for deduplicated reads.
+3. **Micro-batch processor** — standalone Pandas processor is the practical default; Spark/Databricks files remain as optional/reference implementation.
+4. **No ORM** — backend uses `database/sql` and direct SQL strings against ClickHouse.
+5. **AI as interpretable post-processing** — signal scoring, anomaly detection, and regime classification are stored back into ClickHouse and consumed by the dashboard.
+6. **Non-technical product affordances** — Market Story translates technical signals into plain English, and Simulator answers "what if I bought then?" using historical candles.
 
-## ClickHouse schema (key tables)
+## ClickHouse schema
 ```sql
--- Primary time-series table
 market_klines_stream   ORDER BY (symbol, timestamp)   ENGINE ReplacingMergeTree(ingestion_time)
 market_latest_price    ORDER BY (symbol)               ENGINE ReplacingMergeTree(ingestion_time)
+market_ohlcv_1h        AggregatingMergeTree            hourly aggregate view
 
--- AI output tables
-ai_signals    ORDER BY (symbol, timestamp)
-ai_anomalies  ORDER BY (symbol, timestamp)
-ai_regimes    ORDER BY (symbol, timestamp)
+market_ai_signals      ORDER BY (symbol, timestamp)
+market_anomalies       ORDER BY (symbol, timestamp, type)
+market_regimes         ORDER BY (symbol, timestamp)
 ```
 
 ## Backend API structure
-- `GET /api/v1/market/symbols`        — list available symbols
-- `GET /api/v1/market/latest`         — latest prices for all symbols
-- `GET /api/v1/market/klines/:symbol` — OHLCV klines with features
-- `GET /api/v2/ai/signals/:symbol`    — AI signal scores
-- `GET /api/v2/ai/anomalies/:symbol`  — anomaly flags
-- `GET /api/v2/ai/regimes/:symbol`    — market regime classification
+- `GET /api/v1/ping`
+- `GET /api/v1/market/symbols`
+- `GET /api/v1/market/overview`
+- `GET /api/v1/market/klines?symbol=BTCUSDT&limit=200`
+- `GET /api/v1/ai/signals`
+- `GET /api/v1/ai/anomalies`
+- `GET /api/v1/ai/regime`
+- `GET /api/v2/portfolio/summary` and `/positions` are mock portfolio scaffold endpoints.
 
-## What's complete
-- [x] Stream producer (Binance WS → Redis Streams)
-- [x] Stream processor (Redis → ClickHouse, Pandas + Spark variants)
-- [x] Batch pipeline + feature generation
-- [x] AI: signal scoring, anomaly detection, regime classification
-- [x] Backend API v1 (market) + v2 (AI) with raw SQL
-- [x] Frontend: live data from backend, charts, AI panel
-- [x] ClickHouse schema (both market + AI tables)
-- [x] Docker + docker-compose (local + cloud)
-- [x] Documentation: README, TRADE_OFFS, AI.md, SETUP_GUIDE
+## Frontend tabs
+- `EQUITIES` — VN equities visual shell with static watchlist and placeholder panels.
+- `CRYPTO` — live crypto watchlist + backend candlestick chart.
+- `NEWS` / Intelligence — market pulse, signal center, Market Story, anomaly timeline, regime/detail panel, optional Gemini LLM signal card.
+- `SIMULATOR` — what-if buy simulator using Binance REST candles and Recharts portfolio-value visualization.
+- `OVERVIEW` — placeholder screener shell.
+
+## Environment notes
+- Required cloud runtime variables are documented in `.env.example`.
+- Aiven certificates are expected in `jobs/` and are gitignored.
+- `VITE_GEMINI_API_KEY` is optional and only powers the frontend Gemini panel. The rest of the dashboard does not need it.
+
+## Known limitations to keep visible
+- Current Pandas stream feature windows are computed per micro-batch; production-grade rolling windows should join recent historical candles or maintain state.
+- AI jobs currently query recent rows with global `LIMIT`; production-grade sampling should limit per symbol.
+- Browser-side Gemini exposes a Vite public key by design. For public deployment, move Gemini calls behind a backend endpoint with rate limiting.
 
 ## Reference files
 - Architecture trade-offs: `TRADE_OFFS.md`
-- DB deep-dive (VN): `CLICKHOUSE_DEEP_DIVE.md`
-- DB deep-dive (EN): `CLICKHOUSE_DEEP_DIVE_EN.md`
+- Setup guide: `SETUP_GUIDE.md`
 - Grading spec: `REQUIREMENTS.md`
 - AI attribution: `AI.md`

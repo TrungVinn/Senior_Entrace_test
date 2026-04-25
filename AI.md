@@ -2,81 +2,85 @@
 
 ## 1. Tools Used
 
-| Tool | Version | Purpose |
-|------|---------|---------|
-| Claude Code (CLI) | Claude Opus 4.6 | Primary development assistant — architecture design, code generation, testing, debugging |
+| Tool | Purpose |
+|------|---------|
+| Claude Code | Primary development assistant for architecture, pipeline code, backend, frontend UI, docs, and iterative fixes |
+| Codex | Secondary review/documentation assistant for code review, doc synchronization, and quality checks |
 
 ## 2. Attribution
 
-### AI-Generated Code (with human review & guidance)
+### AI-generated or AI-assisted code with human review
 
-| Component | Files | AI Contribution |
-|-----------|-------|-----------------|
-| **Stream Producer** | `jobs/src/stream/producer.py` | Full implementation — async WebSocket consumer, Redis Streams publisher, reconnect logic |
-| **Stream Processor** | `jobs/src/stream/processor.py`, `processor_standalone.py`, `processor_notebook.py` | Full implementation — Spark foreachBatch pattern, standalone Pandas processor, Databricks notebook |
-| **Feature Generation** | `jobs/src/common/features.py` | Full implementation — SMA, RSI, volatility, VWAP in both PySpark and Pandas |
-| **AI Signal Scoring** | `jobs/src/ai/signal_scoring.py` | Full implementation — RSI + SMA crossover + volume composite scoring |
-| **AI Anomaly Detection** | `jobs/src/ai/anomaly_detection.py` | Full implementation — Z-score method + Isolation Forest (sklearn) |
-| **AI Regime Classification** | `jobs/src/ai/regime_classification.py` | Full implementation — volatility percentile-based regime detection |
-| **Backend API** | `backend/internal/v1/`, `backend/internal/v2/` | Full rewrite — replaced GORM with raw SQL (database/sql + clickhouse-go), added market + AI endpoints |
-| **ClickHouse Schema** | `sql/clickhouse_schema.sql`, `sql/clickhouse_ai_schema.sql` | Full implementation — ReplacingMergeTree tables, materialized views, aggregations |
-| **Frontend API Layer** | `src/app/lib/api.ts`, `src/app/hooks/usePolling.ts` | Full implementation — typed fetch wrapper, auto-refresh hook |
-| **Frontend Updates** | `Watchlist.tsx`, `TradingChart.tsx`, `IntelligencePanel.tsx` | Modified to fetch live data from backend API |
-| **Docker & DevOps** | `docker-compose.yml`, Dockerfiles | Full implementation — multi-service orchestration |
-| **Documentation** | `SETUP_GUIDE.md`, `TRADE_OFFS.md`, `AI.md`, `README.md` | Full generation with human-specified requirements |
+| Component | Files | Contribution |
+|-----------|-------|--------------|
+| Stream Producer | `jobs/src/stream/producer.py` | Binance WebSocket consumer, Aiven Kafka producer, SSL setup, reconnect loop |
+| Stream Processor | `jobs/src/stream/processor_standalone.py`, `processor.py`, `processor_notebook.py` | Kafka/Pandas processor plus Spark/Databricks variants |
+| Feature Generation | `jobs/src/common/features.py` | SMA, RSI, returns, volatility, VWAP in Pandas and PySpark style |
+| AI Signal Scoring | `jobs/src/ai/signal_scoring.py` | RSI + SMA + volume composite score |
+| AI Anomaly Detection | `jobs/src/ai/anomaly_detection.py` | Z-score and Isolation Forest anomaly detection |
+| AI Regime Classification | `jobs/src/ai/regime_classification.py` | Volatility-percentile regime classification |
+| Backend API | `backend/internal/v1/`, `backend/internal/v2/`, `backend/internal/db/` | Raw SQL ClickHouse backend, market endpoints, AI endpoints, mock portfolio scaffold |
+| ClickHouse Schema | `sql/clickhouse_schema.sql`, `sql/clickhouse_ai_schema.sql` | Stream tables, latest-price table, hourly aggregate, AI output tables |
+| Frontend API Layer | `src/app/lib/api.ts`, `src/app/hooks/usePolling.ts` | Typed API wrapper and polling hook |
+| Frontend Dashboard | `src/app/App.tsx`, `Watchlist.tsx`, `TradingChart.tsx`, `IntelligencePanel.tsx`, `Simulator.tsx` | Live chart/watchlist, Intelligence tab, Market Story, Gemini panel, What-if Simulator |
+| Docker & DevOps | `docker-compose.yml`, `jobs/Dockerfile.*`, `backend/Dockerfile` | Multi-service local orchestration |
+| Documentation | `README.md`, `SETUP_GUIDE.md`, `TRADE_OFFS.md`, `CLAUDE.md`, `AI.md` | Setup, architecture, trade-offs, and attribution |
 
-### Human-Authored / Template Code
+### Human-authored / template foundation
 
 | Component | Source |
 |-----------|--------|
-| Backend template structure | Repository template (`cmd/main.go`, `internal/` layout, `api/response.go`, `middlewares/`) |
-| Frontend UI components | Repository template (App.tsx, MarketOverview, MarketTable, OrderBook, NewsPanel, Screener, Shadcn UI library) |
-| Jobs template | Repository template (`config/settings.py`, `utils/logger.py`, `utils/database.py`, `market_data_fetcher.py`) |
+| Entrance-test brief | `REQUIREMENTS.md` |
+| Backend scaffold style | Repository template with `cmd/main.go`, `internal/...`, response helpers, middleware pattern |
+| UI component library | Template Shadcn/Radix components under `src/app/components/ui/` |
+| Initial project configuration | Existing Vite, package, Docker, and jobs scaffold |
 
-## 3. Setup & Instructions
+## 3. Current Architecture Summary
 
-### Using Claude Code to reproduce this project:
+The submitted implementation uses Kafka on Aiven rather than Redis Streams:
 
-```bash
-# Install Claude Code
-npm install -g @anthropic-ai/claude-code
-
-# Clone the template
-git clone https://github.com/vn-fin/xnoquant.git
-cd xnoquant/fullstackAI
-
-# Start Claude Code
-claude
-
-# Give the prompt:
-# "Implement the full stream pipeline with Redis Streams replacing Kafka,
-#  then build the backend API, AI engineering, and frontend connection
-#  according to REQUIREMENTS.md"
+```text
+Binance WebSocket → Python Producer → Kafka (Aiven SSL) → Python Processor → ClickHouse Cloud
 ```
+
+The frontend consumes backend APIs for live dashboard data:
+
+```text
+/api/v1/market/overview
+/api/v1/market/klines?symbol=BTCUSDT&limit=200
+/api/v1/ai/signals
+/api/v1/ai/anomalies
+/api/v1/ai/regime
+```
+
+The Simulator tab uses Binance public REST directly for flexible historical candle intervals.
 
 ## 4. Prompt Engineering Examples
 
-### Example 1: Architecture Decision — Redis vs Kafka
-**Prompt:** "Implement stream pipeline from the requirements. Replace Kafka with Redis Streams."
+### Example 1: Broker decision and pipeline implementation
 
-**AI Response:** Designed the full architecture with justification:
-- Redis Streams chosen for scale fit (~10 msg/s), cost ($5/mo vs $80/mo Kafka), and operational simplicity
-- Consumer groups for at-least-once delivery
-- foreachBatch pattern for Spark integration (no native Redis-Spark connector)
-- ReplacingMergeTree for idempotent ClickHouse writes
+**Prompt style:** "Implement the stream pipeline from Binance WebSocket through a managed broker into ClickHouse. Keep the backend raw SQL and make it demo-friendly."
 
-### Example 2: AI Engineering — Multi-model Approach
-**Prompt:** "Implement AI post-processing: anomaly detection, regime classification, signal scoring"
+**Result:** Kafka/Aiven pipeline with `aiokafka` producer, `confluent-kafka` processor, ClickHouse inserts, and Dockerized services.
 
-**AI Response:** Designed three complementary models:
-- **Signal Scoring**: Weighted composite of RSI (oversold/overbought), SMA crossover (trend), and volume anomaly (momentum) — interpretable, no black box
-- **Anomaly Detection**: Dual approach — statistical Z-score for speed + Isolation Forest for multivariate patterns
-- **Regime Classification**: Volatility percentile thresholds with confidence scoring based on distance from regime boundaries
+### Example 2: Interpretable AI engineering
 
-### Example 3: Backend Rewrite — ORM to Raw SQL
-**Prompt:** "Backend uses GORM which violates the no-ORM requirement. Rewrite with raw SQL."
+**Prompt style:** "Add AI post-processing that is explainable and consumed by backend/frontend."
 
-**AI Response:** Replaced GORM with `database/sql` + `clickhouse-go/v2` driver:
-- Direct SQL queries to ClickHouse (`market_latest_price FINAL`, `market_klines_stream FINAL`)
-- Proper nullable handling with `*float64` for optional feature columns
-- Mock data fallback when ClickHouse is not connected (graceful degradation)
+**Result:** Three lightweight jobs:
+
+- Signal scoring from RSI, SMA crossover, and volume.
+- Anomaly detection using rolling Z-score and Isolation Forest.
+- Regime classification using volatility percentiles.
+
+### Example 3: Non-technical frontend features
+
+**Prompt style:** "Make one part of the dashboard easier for non-technical users."
+
+**Result:** Market Story converts regime/signal/anomaly data into plain-language status, while Simulator lets a user test "what if I bought N candles ago?" without understanding technical indicators.
+
+## 5. Transparency Notes
+
+- All AI-generated code was reviewed and adjusted against the repository structure and grading requirements.
+- Known technical limitations are documented in `TRADE_OFFS.md` and `CLAUDE.md`.
+- The Gemini panel in `IntelligencePanel.tsx` is optional and currently browser-side. For a public deployment, route that call through the Go backend to avoid exposing a public Vite API key.
