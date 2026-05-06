@@ -1,6 +1,6 @@
-# XNO Quant — Market Data System
+# Quant AI Platform — Market Data System
 
-End-to-end crypto market data platform: real-time ingestion → feature engineering → AI post-processing → interactive dashboard. Built as an AI developer entrance test submission.
+End-to-end crypto market data platform: real-time ingestion → feature engineering → AI post-processing → interactive dashboard. Built as a personal project.
 
 ---
 
@@ -301,5 +301,3 @@ cd jobs && python -m compileall -q src  # Python syntax check
 |------|---------|
 | [`SETUP_GUIDE.md`](SETUP_GUIDE.md) | Aiven Kafka, ClickHouse Cloud, Docker, and local startup |
 | [`TRADE_OFFS.md`](TRADE_OFFS.md) | Architecture decisions and alternatives considered |
-| [`CLICKHOUSE_DEEP_DIVE.md`](CLICKHOUSE_DEEP_DIVE.md) | ClickHouse internals and query patterns |
-| [`AI.md`](AI.md) | AI tool attribution log |

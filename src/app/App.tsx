@@ -37,7 +37,7 @@ export default function App() {
       <div className="w-16 bg-[#090b14] border-r border-white/5 flex flex-col items-center py-4 z-50 shadow-[4px_0_24px_rgba(0,0,0,0.5)]">
         <div className="w-10 h-10 bg-gradient-to-br from-indigo-600 to-cyan-500 rounded-lg flex items-center justify-center shadow-[0_0_15px_rgba(6,182,212,0.4)] mb-8 cursor-pointer relative group">
           <div className="w-3 h-3 bg-white rounded-sm"></div>
-          <div className="absolute left-14 bg-white/10 backdrop-blur-md px-2 py-1 rounded text-white text-xs whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity">XNO Quant Base</div>
+          <div className="absolute left-14 bg-white/10 backdrop-blur-md px-2 py-1 rounded text-white text-xs whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity">Quant AI Base</div>
         </div>
 
         <div className="flex flex-col gap-4 w-full">
