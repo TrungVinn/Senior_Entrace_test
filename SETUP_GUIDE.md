@@ -69,14 +69,13 @@ Recommended settings for this project:
 ```text
 CLICKHOUSE_HOST=xxxxxxxx.region.provider.clickhouse.cloud
 CLICKHOUSE_PORT=8443
-CLICKHOUSE_NATIVE_PORT=9440
 CLICKHOUSE_USER=default
 CLICKHOUSE_PASSWORD=your_password_here
 CLICKHOUSE_DATABASE=default
 CLICKHOUSE_SECURE=true
 ```
 
-`CLICKHOUSE_PORT=8443` is used by Python `clickhouse-connect`; `CLICKHOUSE_NATIVE_PORT=9440` is used by Go `clickhouse-go/v2`.
+`CLICKHOUSE_PORT=8443` is used by both Python `clickhouse-connect` and the Go backend over ClickHouse Cloud HTTPS.
 
 ### 2. Create Schema
 
@@ -135,7 +134,6 @@ KAFKA_AUTO_OFFSET_RESET=earliest
 
 CLICKHOUSE_HOST=...
 CLICKHOUSE_PORT=8443
-CLICKHOUSE_NATIVE_PORT=9440
 CLICKHOUSE_USER=default
 CLICKHOUSE_PASSWORD=...
 CLICKHOUSE_DATABASE=default
@@ -286,7 +284,7 @@ npm run build
 | `KAFKA_SSL_KEY` | Producer, Processor | `/app/certs/service.key` | Client key path |
 | `CLICKHOUSE_HOST` | Processor, AI runner, Backend | empty | ClickHouse host |
 | `CLICKHOUSE_PORT` | Processor, AI runner | `8443` | HTTPS port for Python |
-| `CLICKHOUSE_NATIVE_PORT` | Backend | `9440` | Native TCP port for Go |
+| `CLICKHOUSE_PORT` | Backend, processor, AI runner | `8443` | ClickHouse Cloud HTTPS port |
 | `CLICKHOUSE_USER` | Processor, AI runner, Backend | `default` | ClickHouse user |
 | `CLICKHOUSE_PASSWORD` | Processor, AI runner, Backend | empty | ClickHouse password |
 | `CLICKHOUSE_DATABASE` | Processor, AI runner, Backend | `default` | ClickHouse database |

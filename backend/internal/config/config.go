@@ -20,9 +20,8 @@ type Config struct {
 
 func InitConfig() Config {
 	port, _ := strconv.Atoi(getEnv("PORT", "8080"))
-	// Backend uses clickhouse-go native TCP driver (port 9440 secure / 9000 plain),
-	// distinct from the HTTPS port 8443 used by Python clickhouse-connect.
-	chPort, _ := strconv.Atoi(getEnv("CLICKHOUSE_NATIVE_PORT", "9440"))
+	// Backend talks to ClickHouse Cloud over HTTPS on port 8443.
+	chPort, _ := strconv.Atoi(getEnv("CLICKHOUSE_PORT", "8443"))
 	chSecure := getEnv("CLICKHOUSE_SECURE", "true") == "true"
 
 	return Config{

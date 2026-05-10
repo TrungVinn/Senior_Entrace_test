@@ -40,7 +40,7 @@ func InitConnections(cfg config.Config) *Connections {
 			"max_execution_time": 60,
 		},
 		DialTimeout: 10 * time.Second,
-		Protocol:    clickhouse.Native,
+		Protocol:    clickhouse.HTTP,
 	})
 
 	if err := chDB.Ping(); err != nil {

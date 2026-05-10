@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"log"
+	"os"
+	"strings"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/cors"
@@ -15,6 +18,8 @@ import (
 )
 
 func main() {
+	loadEnvFiles()
+
 	cfg := config.InitConfig()
 
 	connections := db.InitConnections(cfg)
@@ -55,4 +60,49 @@ func main() {
 	if err := app.Listen(listenAddr); err != nil {
 		log.Fatalf("server start failed: %v", err)
 	}
+}
+
+func loadEnvFiles() {
+	for _, path := range []string{".env", "../.env"} {
+		if err := loadEnvFile(path); err == nil {
+			return
+		}
+	}
+}
+
+func loadEnvFile(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		if commentIndex := strings.Index(line, " #"); commentIndex != -1 {
+			line = strings.TrimSpace(line[:commentIndex])
+		}
+
+		key, value, found := strings.Cut(line, "=")
+		if !found {
+			continue
+		}
+
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		value = strings.Trim(value, `"'`)
+		if key == "" {
+			continue
+		}
+		if _, exists := os.LookupEnv(key); !exists {
+			_ = os.Setenv(key, value)
+		}
+	}
+
+	return scanner.Err()
 }
